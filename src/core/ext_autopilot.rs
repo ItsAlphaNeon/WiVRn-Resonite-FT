@@ -10,23 +10,30 @@ use crate::core::ext_tracking::unified::UnifiedExpressions;
 
 use super::{bundle::AvatarBundle, ext_tracking::ExtTracking, AppState};
 
+// --- Constants for movement thresholds ---
 const MOVE_THRESHOLD_METERS: f32 = 0.1;
 const RUN_THRESHOLD_METERS: f32 = 0.5;
-const ROTATE_THRESHOLD_RAD: f32 = PI / 120.; // 1.5deg
-const ROTATE_START_THRESHOLD_RAD: f32 = PI * 2.; // never
+const ROTATE_THRESHOLD_RAD: f32 = PI / 120.; // 1.5 degrees
+const ROTATE_START_THRESHOLD_RAD: f32 = PI * 2.; // A very high value, effectively disabling rotation start based on this threshold.
 
+// --- Status messages for the UI, lazily initialized ---
+/// Status message for when "Follow" mode is active.
 static STA_FLW: Lazy<Arc<str>> = Lazy::new(|| format!("{}", "FOLLOW".color(Color::Green)).into());
+/// Status message for when "Manual" autopilot is active.
 static STA_MAN: Lazy<Arc<str>> = Lazy::new(|| format!("{}", "MANUAL".color(Color::Green)).into());
+/// Status message for when autopilot is off.
 static STA_OFF: Lazy<Arc<str>> =
     Lazy::new(|| format!("{}", "AP-OFF".color(Color::BrightBlack)).into());
 
+/// This struct manages the state for the AutoPilot extension.
+/// It allows for controlling the avatar's movement and actions using facial expressions or by following a target.
 pub struct ExtAutoPilot {
-    voice: bool,
-    voice_lock: bool,
-    jumped: bool,
-    jump_cd: i32,
-    follow_before: bool,
-    last_sent: Vec3,
+    voice: bool,       // Is the "Voice" button currently pressed?
+    voice_lock: bool,  // A lock to prevent rapid toggling of the voice state.
+    jumped: bool,      // Is the "Jump" button currently pressed?
+    jump_cd: i32,      // A cooldown timer for the jump action.
+    follow_before: bool, // Was the avatar in "Follow" mode in the previous step?
+    last_sent: Vec3,   // The last set of movement values sent, to avoid sending redundant OSC messages.
 }
 
 impl ExtAutoPilot {
@@ -41,15 +48,20 @@ impl ExtAutoPilot {
         }
     }
 
+    /// The main update loop for the AutoPilot extension, called on every frame.
+    /// It decides which control mode to use (Follow, Manual, or Off) and sends the appropriate OSC commands.
     pub fn step(&mut self, state: &mut AppState, tracking: &ExtTracking, bundle: &mut OscBundle) {
         let mut status_set = false;
 
+        // Handle the "avatar flight" mechanic first.
         self.avatar_flight(state, bundle);
 
+        // --- Determine control mode ---
         let mut follow = false;
         let mut follow_distance = MOVE_THRESHOLD_METERS;
         let mut allow_rotate = false;
 
+        // "Follow" mode is activated by grabbing a "Seeker" object or enabling a tracker.
         if let Some(OscType::Bool(true)) = state.params.get("Seeker_IsGrabbed") {
             follow = true;
         } else if let Some(OscType::Bool(true)) = state.params.get("Tracker1_Enable") {
@@ -63,16 +75,20 @@ impl ExtAutoPilot {
         let mut horizontal = 0.;
 
         if follow {
+            // --- Follow Mode Logic ---
+            // Calculate movement based on the position of a target object determined by trilateration.
             if let Some(tgt) = vec3_to_target(&state.params) {
                 let dist_horizontal = (tgt.x * tgt.x + tgt.z * tgt.z).sqrt();
-                let mut theta = (tgt.x / tgt.z).atan();
+                let mut theta = (tgt.x / tgt.z).atan(); // Angle to the target
 
+                // Adjust angle based on quadrant
                 if tgt.z < 0. {
                     theta = if theta < 0. { PI + theta } else { -PI + theta };
                 }
 
                 let abs_theta = theta.abs();
 
+                // If the target is beyond the follow distance, move towards it.
                 if dist_horizontal > follow_distance {
                     let mult = (dist_horizontal / RUN_THRESHOLD_METERS).clamp(0., 1.);
 
@@ -83,15 +99,18 @@ impl ExtAutoPilot {
                     }
                     self.follow_before = true;
                 } else if allow_rotate && abs_theta > ROTATE_START_THRESHOLD_RAD {
+                    // If close to the target, just rotate to face it.
                     look_horizontal = theta.signum() * (abs_theta / (PI / 2.)).clamp(0., 1.);
                 }
                 state.status.add_item(STA_FLW.clone());
                 status_set = true;
             }
         } else if matches!(state.params.get("AutoPilot"), Some(OscType::Bool(true))) {
+            // --- Manual Control Logic (using facial expressions) ---
             state.status.add_item(STA_MAN.clone());
             status_set = true;
 
+            // Use eye gaze for looking left/right and jumping.
             if let Some(eye) = tracking.data.eyes[0] {
                 if !(-0.6..=0.5).contains(&eye.z) {
                     look_horizontal = -eye.z;
@@ -106,6 +125,7 @@ impl ExtAutoPilot {
                 }
             }
 
+            // Use cheek puffing/sucking for forward/backward movement.
             let puff = tracking.data.getu(UnifiedExpressions::CheekPuffLeft)
                 + tracking.data.getu(UnifiedExpressions::CheekPuffRight);
 
@@ -118,19 +138,20 @@ impl ExtAutoPilot {
                 vertical = -(suck * 0.6).min(1.0);
             }
 
+            // Use raising eyebrows to toggle the "Voice" button.
             let brows = tracking.data.getu(UnifiedExpressions::BrowInnerUpLeft)
                 + tracking.data.getu(UnifiedExpressions::BrowInnerUpRight)
                 + tracking.data.getu(UnifiedExpressions::BrowOuterUpLeft)
                 + tracking.data.getu(UnifiedExpressions::BrowOuterUpRight);
 
             if brows < 2.0 {
-                self.voice_lock = false;
+                self.voice_lock = false; // Release the lock when brows are lowered.
             }
 
             if brows > 3.0 && !self.voice {
                 bundle.send_input_button("Voice", true);
                 self.voice = true;
-                self.voice_lock = true;
+                self.voice_lock = true; // Lock to prevent immediate release.
             } else if self.voice && !self.voice_lock {
                 bundle.send_input_button("Voice", false);
                 self.voice = false;
@@ -141,6 +162,8 @@ impl ExtAutoPilot {
             state.status.add_item(STA_OFF.clone());
         }
 
+        // --- Send Movement Commands ---
+        // Only send updates if the values have changed significantly to reduce network traffic.
         if (look_horizontal - self.last_sent.x).abs() > 0.01 {
             bundle.send_input_axis("LookHorizontal", look_horizontal);
             self.last_sent.x = look_horizontal;
@@ -156,6 +179,9 @@ impl ExtAutoPilot {
             self.last_sent.z = horizontal;
         }
     }
+
+    /// Implements a "flight" or "flap to jump" mechanic.
+    /// This is triggered by a specific VRChat emote and raising both hands above the head.
     fn avatar_flight(&mut self, state: &mut AppState, bundle: &mut OscBundle) {
         const FLIGHT_INTS: Range<i32> = 120..125;
 
@@ -167,8 +193,10 @@ impl ExtAutoPilot {
         let right_pos = state.tracking.right_hand.translation;
         let head_pos = state.tracking.head.translation;
 
+        // If the correct emote is active and hands are above the head...
         if FLIGHT_INTS.contains(emote) && left_pos.y > head_pos.y && right_pos.y > head_pos.y {
             if !self.jumped && self.jump_cd <= 0 {
+                // Calculate jump "power" based on hand height.
                 let diff = (left_pos.y + left_pos.y) * 0.5 + 0.1 - head_pos.y;
                 let diff = diff.clamp(0., 0.3);
 
@@ -176,6 +204,7 @@ impl ExtAutoPilot {
                 info!("Jumping with diff {}", diff);
 
                 self.jumped = true;
+                // Set a cooldown for the next jump, creating a "flap" rhythm.
                 self.jump_cd = (30. - 100. * diff) as i32;
             } else {
                 bundle.send_input_button("Jump", false);
@@ -183,6 +212,7 @@ impl ExtAutoPilot {
                 self.jumped = false;
             }
         } else if self.jumped {
+            // Ensure jump is released if conditions are no longer met.
             bundle.send_input_button("Jump", false);
             self.jump_cd = 0;
             self.jumped = false;
@@ -190,17 +220,26 @@ impl ExtAutoPilot {
     }
 }
 
+// --- Trilateration Logic ---
+// This section is used to determine the 3D position of a target based on its "contact" distance
+// from four known points. This is likely used for the "Follow" mode to track an in-game object.
+
 const CONTACT_RADIUS: f32 = 3.;
 const DIST_MULTIPLIER: f32 = 25.;
 
+/// Converts a contact value (0.0 to 1.0) to a distance in meters.
 fn contact_to_dist(d: &f32) -> f32 {
     (1. - d) * CONTACT_RADIUS
 }
 
+// The four reference points for trilateration.
 const P1: Vec3 = Vec3::new(1., 0., 0.);
 const P2: Vec3 = Vec3::new(0., 1., 0.);
 const P3: Vec3 = Vec3::new(0., 0., 1.);
+// The fourth point is implicitly the origin (0,0,0).
 
+/// Calculates the 3D position of a point given its distance from four other known points.
+/// See: https://en.wikipedia.org/wiki/Trilateration
 fn trilaterate(r1: f32, r2: f32, r3: f32, r4: f32) -> Vec3 {
     let p2_neg_p1 = P2 - P1;
     let p3_neg_p1 = P3 - P1;
@@ -218,12 +257,14 @@ fn trilaterate(r1: f32, r2: f32, r3: f32, r4: f32) -> Vec3 {
     let x = (r1_sq - r2 * r2 + d * d) / (2. * d);
     let y = ((r1_sq - r3 * r3 + i * i + j * j) / (2. * j)) - (i / j * x);
 
+    // There are two possible solutions for the z-coordinate.
     let z1 = (r1_sq - x * x - y * y).sqrt();
     let z2 = -1. * z1;
 
     let ans1 = P1 + x * e_x + y * e_y + z1 * e_z;
     let ans2 = P1 + x * e_x + y * e_y + z2 * e_z;
 
+    // Use the fourth distance (r4) to disambiguate between the two solutions.
     if ans1.length() - r4 < ans2.length() - r4 {
         ans1
     } else {
@@ -231,6 +272,8 @@ fn trilaterate(r1: f32, r2: f32, r3: f32, r4: f32) -> Vec3 {
     }
 }
 
+/// Reads the four contact parameters from OSC, converts them to distances,
+/// and calls the trilateration function to get the final target vector.
 fn vec3_to_target(parameters: &HashMap<Arc<str>, OscType>) -> Option<Vec3> {
     let par1 = parameters.get("Seeker_P0")?;
     let par2 = parameters.get("Seeker_P1")?;

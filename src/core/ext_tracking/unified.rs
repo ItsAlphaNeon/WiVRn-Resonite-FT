@@ -4,61 +4,87 @@ use strum::{EnumCount, EnumIter, EnumString, IntoStaticStr};
 
 use crate::core::{bundle::AvatarBundle, ext_oscjson::MysteryParam, AppState};
 
+/// Represents a 3D pose with orientation (as a quaternion) and position (as a vector).
+/// Used for tracking the orientation and position of eyes.
 #[derive(Debug, Default, Clone)]
 pub struct Posef {
     pub orientation: Quat,
     pub position: Vec3,
 }
 
+/// Holds the pose data for both left and right eyes.
+/// Each eye's data is optional, as some tracking systems may only provide data for one eye or none.
 #[derive(Debug, Default, Clone)]
 pub struct UnifiedEyeData {
     pub left: Option<Posef>,
     pub right: Option<Posef>,
 }
 
+/// A type alias for an array holding all the unified and combined expression values.
+/// The size of the array is determined by the total number of `UnifiedExpressions` and `CombinedExpression` variants.
 pub type UnifiedShapes = [f32; NUM_SHAPES];
 
+/// A trait providing convenient accessor methods for reading and writing expression values
+/// from a `UnifiedShapes` array using the `UnifiedExpressions` and `CombinedExpression` enums as keys.
 pub trait UnifiedShapeAccessors {
+    /// Gets the value of a raw, unified expression.
     fn getu(&self, exp: UnifiedExpressions) -> f32;
+    /// Gets the value of a combined, derived expression.
     fn getc(&self, exp: CombinedExpression) -> f32;
+    /// Sets the value of a raw, unified expression.
     fn setu(&mut self, exp: UnifiedExpressions, value: f32);
+    /// Sets the value of a combined, derived expression.
     fn setc(&mut self, exp: CombinedExpression, value: f32);
 }
 
 impl UnifiedShapeAccessors for UnifiedShapes {
+    /// Gets a unified expression value by its enum variant.
     #[inline(always)]
     fn getu(&self, exp: UnifiedExpressions) -> f32 {
         self[exp as usize]
     }
 
+    /// Gets a combined expression value by its enum variant.
     #[inline(always)]
     fn getc(&self, exp: CombinedExpression) -> f32 {
         self[exp as usize]
     }
 
+    /// Sets a unified expression value by its enum variant.
     #[inline(always)]
     fn setu(&mut self, exp: UnifiedExpressions, value: f32) {
         self[exp as usize] = value;
     }
 
+    /// Sets a combined expression value by its enum variant.
     #[inline(always)]
     fn setc(&mut self, exp: CombinedExpression, value: f32) {
         self[exp as usize] = value;
     }
 }
 
+/// A type alias for a single expression shape value.
 pub type UnifiedExpressionShape = f32;
 
+/// This struct represents the complete state of face and eye tracking at a single point in time.
+/// It holds raw eye tracking data, an array of all expression values (`shapes`), and state
+/// for managing the data flow to the OSC bundle.
 #[derive(Debug, Clone)]
 pub struct UnifiedTrackingData {
+    /// Stores the euler angle representation of eye rotation for left and right eyes.
     pub eyes: [Option<Vec3>; 2],
+    /// The array containing all raw and combined expression values.
     pub shapes: [UnifiedExpressionShape; NUM_SHAPES],
+    /// A snapshot of the shapes from the previous frame, used to detect changes.
     old_shapes: Option<[UnifiedExpressionShape; NUM_SHAPES]>,
+    /// Flag to indicate if expression tracking is currently active and being sent.
     expression_tracking: bool,
+    /// Flag to indicate if lip tracking is currently active and being sent.
     lip_tracking: bool,
 }
 
 impl Default for UnifiedTrackingData {
+    /// Creates a new `UnifiedTrackingData` with default (zeroed) values.
     fn default() -> Self {
         Self {
             eyes: [None, None],
@@ -71,27 +97,36 @@ impl Default for UnifiedTrackingData {
 }
 
 impl UnifiedTrackingData {
+    /// Convenience method to get a raw unified expression value from the `shapes` array.
     #[inline(always)]
     pub fn getu(&self, exp: UnifiedExpressions) -> f32 {
         self.shapes[exp as usize]
     }
 
+    /// Convenience method to get a combined expression value from the `shapes` array.
     #[inline(always)]
     pub fn getc(&self, exp: CombinedExpression) -> f32 {
         self.shapes[exp as usize]
     }
 
+    /// Convenience method to set a raw unified expression value in the `shapes` array.
     #[inline(always)]
     pub fn setu(&mut self, exp: UnifiedExpressions, value: f32) {
         self.shapes[exp as usize] = value;
     }
 
+    /// Convenience method to set a combined expression value in the `shapes` array.
     #[inline(always)]
     pub fn setc(&mut self, exp: CombinedExpression, value: f32) {
         self.shapes[exp as usize] = value;
     }
 
+    /// Calculates the values for `CombinedExpression`s based on the raw `UnifiedExpressions`.
+    /// This method synthesizes more abstract or game-friendly parameters (like a single "BrowUp"
+    /// from separate inner and outer brow movements) from the detailed tracking data.
+    /// It also handles custom logic, like the "Blush" parameter.
     pub fn calc_combined(&mut self, state: &mut AppState) {
+        // --- Eye Openness ---
         let left_eye_openness =
             (1. - self.getu(UnifiedExpressions::EyeClosedLeft) * 1.5).clamp(0., 1.);
         self.setc(
@@ -122,6 +157,7 @@ impl UnifiedTrackingData {
                 * 0.5,
         );
 
+        // --- Brow Movements ---
         let brow_down_left = self.getu(UnifiedExpressions::BrowLowererLeft) * 0.75
             + self.getu(UnifiedExpressions::BrowPinchLeft) * 0.25;
         let brow_down_right = self.getu(UnifiedExpressions::BrowLowererRight) * 0.75
@@ -145,6 +181,7 @@ impl UnifiedTrackingData {
             (brow_outer_up + brow_inner_up) * 0.5,
         );
 
+        // --- Brow Expressions ---
         let brow_exp_left = (self.getu(UnifiedExpressions::BrowInnerUpLeft) * 0.5
             + self.getu(UnifiedExpressions::BrowOuterUpLeft) * 0.5)
             - brow_down_left;
@@ -159,6 +196,7 @@ impl UnifiedTrackingData {
             (brow_exp_left + brow_exp_right) * 0.5,
         );
 
+        // --- Mouth Expressions ---
         let mouth_smile_left = self.getu(UnifiedExpressions::MouthCornerPullLeft) * 0.75
             + self.getu(UnifiedExpressions::MouthCornerSlantLeft) * 0.25;
         let mouth_smile_right = self.getu(UnifiedExpressions::MouthCornerPullRight) * 0.75
@@ -238,6 +276,7 @@ impl UnifiedTrackingData {
                 * 0.5,
         );
 
+        // --- Lip Suck and Funnel ---
         self.setc(
             CombinedExpression::LipSuckUpper,
             (self.getu(UnifiedExpressions::LipSuckUpperLeft)
@@ -291,6 +330,7 @@ impl UnifiedTrackingData {
                 * 0.5,
         );
 
+        // --- Mouth Position and Jaw Movement ---
         let mouth_upper_up = (self.getu(UnifiedExpressions::MouthUpperUpLeft)
             + self.getu(UnifiedExpressions::MouthUpperUpRight))
             * 0.5;
@@ -358,6 +398,7 @@ impl UnifiedTrackingData {
                 * 0.5,
         );
 
+        // --- Ear Movements ---
         self.setc(
             CombinedExpression::EarLeft,
             (self.getu(UnifiedExpressions::BrowInnerUpLeft)
@@ -376,6 +417,7 @@ impl UnifiedTrackingData {
             .clamp(-1.0, 1.0),
         );
 
+        // --- Tongue Tracking ---
         self.setc(
             CombinedExpression::TongueX,
             self.getu(UnifiedExpressions::TongueRight) - self.getu(UnifiedExpressions::TongueLeft),
@@ -385,6 +427,8 @@ impl UnifiedTrackingData {
             self.getu(UnifiedExpressions::TongueUp) - self.getu(UnifiedExpressions::TongueDown),
         );
 
+        // --- Blush Logic ---
+        // Determines if the blush effect should be active based on OSC parameters or eye gaze.
         let allow_blush = !matches!(state.params.get("AllowBlush"), Some(OscType::Bool(false)));
 
         // Custom stuff
@@ -398,6 +442,7 @@ impl UnifiedTrackingData {
         };
         let blush_eye = self.eyes[0].map(|e| e.x).unwrap_or(0.0) > 0.3;
 
+        // Smoothly increase or decrease the blush value over time.
         let rate = if allow_blush && (blush_face || blush_nade || blush_eye) {
             0.10
         } else {
@@ -409,6 +454,9 @@ impl UnifiedTrackingData {
         self.setc(CombinedExpression::Blush, new_blush);
     }
 
+    /// Compares the current `shapes` with `old_shapes` to find which expressions have changed
+    /// significantly since the last frame. This is not currently used but could be an optimization
+    /// to only send changed parameters.
     fn dirty_shapes(&self) -> Vec<usize> {
         let mut dirty = Vec::new();
 
@@ -424,11 +472,18 @@ impl UnifiedTrackingData {
         dirty
     }
 
+    /// Applies the current tracking data to an OSC bundle.
+    /// It sends all expression values and eye tracking data as OSC messages.
+    ///
+    /// # Arguments
+    /// * `params` - An array of `MysteryParam`s which defines how each expression is named and sent.
+    /// * `bundle` - The `OscBundle` to which the messages will be added.
     pub fn apply_to_bundle(
         &mut self,
         params: &mut [Option<MysteryParam>; NUM_SHAPES],
         bundle: &mut OscBundle,
     ) {
+        // Ensure that the game knows expression and lip tracking are active.
         if !self.expression_tracking {
             bundle.send_parameter("ExpressionTrackingActive", OscType::Bool(true));
             self.expression_tracking = true;
@@ -439,15 +494,19 @@ impl UnifiedTrackingData {
         }
         //bundle.send_parameter("EyeTrackingActive", OscType::Bool(true));
 
+        // Iterate through all shapes and send them if a corresponding parameter mapping exists.
         for (idx, shape) in self.shapes.iter().enumerate() {
             if let Some(param) = &mut params[idx] {
                 param.send(*shape, bundle);
             }
         }
+        // Save the current shapes for the next frame's `dirty_shapes` check.
         self.old_shapes = Some(self.shapes);
 
+        // Send eye tracking data if available.
         if let Some(left_euler) = self.eyes[0] {
             if params[CombinedExpression::EyeLidLeft as usize].is_none() {
+                // Fallback for avatars that don't support separate eye closing.
                 // in case avatar doesn't support separate eye closed
                 bundle.send_tracking(
                     "/tracking/eye/EyesClosedAmount",
@@ -456,6 +515,7 @@ impl UnifiedTrackingData {
             }
             let right_euler = self.eyes[1].unwrap_or(left_euler);
 
+            // Send combined pitch/yaw for both eyes in a single message.
             bundle.send_tracking(
                 "/tracking/eye/LeftRightPitchYaw",
                 vec![
@@ -469,8 +529,13 @@ impl UnifiedTrackingData {
     }
 }
 
+/// The total number of expression shapes, which is the sum of all `UnifiedExpressions` and `CombinedExpression` variants.
 pub const NUM_SHAPES: usize = UnifiedExpressions::COUNT + CombinedExpression::COUNT;
 
+/// This enum represents the set of raw, "biometrically-accurate" facial expressions
+/// provided by advanced tracking hardware (like the Varjo Aero or VRChat's Unified Expressions standard).
+/// Each variant corresponds to a specific, isolated muscle movement in the face.
+/// The comments for each variant describe the anatomical basis for the expression.
 #[allow(unused)]
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, EnumIter, EnumCount, EnumString, IntoStaticStr)]
@@ -601,6 +666,10 @@ pub enum UnifiedExpressions {
     TongueTwistLeft, // Tongue tip rotates counter-clockwise from POV with the rest of the tongue following gradually.
 }
 
+/// This enum represents a set of derived, simplified, or combined facial expressions.
+/// These are calculated in the `calc_combined` function from the raw `UnifiedExpressions`.
+/// They provide more game-friendly or abstract controls that are easier for avatar creators
+/// to work with (e.g., a single `BrowUp` instead of separate inner/outer/left/right brow movements).
 #[allow(unused)]
 #[repr(usize)]
 #[derive(Debug, Clone, Copy, EnumIter, EnumCount, EnumString, IntoStaticStr)]
