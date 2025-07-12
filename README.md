@@ -1,6 +1,6 @@
-# OSC Avatar Manager
+# OSC Avatar Manager + Steam Link
 
-This is a personal project that includes a face tracking relay (VRCFT replacement), among other things.
+This is a fork of oscavmgr with Steam Link Emulation
 
 Supported:
 
@@ -94,13 +94,7 @@ To read a value:
 
 ## Using with Resonite
 
-Enable this mod: [galister/EyeTrackVRResonite](https://github.com/galister/EyeTrackVRResonite) (This is a fork that supports both Eye + Face)
-
-With the mod enabled, simply start OscAvMgr.
-
-A set of DynamicValueVariables will be created for you. Use them to drive your choice of blendshapes. (Network syncing is already handled for you).
-
-If you are starting up Resonite after using VRC, you will need to restart OscAvMgr, or it will keep sending the set of parameters from your last VRC avatar!
+Placeholder Placeholder Placeholder
 
 **Pico 4 Pro Users**: Your eyes will be always closed. To fix this, remove the eyelid blendshapes from your EyeManager, and create a second EyeManager (not driven by OscAvMgr) to drive the eyelids.
 
